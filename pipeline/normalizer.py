@@ -246,6 +246,7 @@ def normalizar(raw: BeneficioRaw) -> BeneficioNormalizado | None:
         categoria=categoria,
         tarjeta=tarjeta,
         regiones=regiones,
+        condiciones=raw.condiciones.strip(),
         url_fuente=raw.url_fuente,
         fecha_scraping=raw.fecha_scraping,
         categoria_pendiente=categoria_pendiente,

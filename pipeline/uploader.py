@@ -54,14 +54,18 @@ def insertar(beneficios: list[BeneficioNormalizado]) -> int:
                 cur.execute(
                     """
                     INSERT INTO beneficios
-                        (comercio, descuento, banco_id, categoria_id, tipo_tarjeta_id,
+                        (comercio, descuento, condiciones, banco_id, categoria_id, tipo_tarjeta_id,
                          url_fuente, activo, fingerprint)
-                    VALUES (%s, %s, %s, %s, %s, %s, true, %s)
-                    ON CONFLICT (fingerprint) DO NOTHING
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, true, %s)
+                    ON CONFLICT (fingerprint) DO UPDATE SET
+                        descuento   = EXCLUDED.descuento,
+                        condiciones = EXCLUDED.condiciones,
+                        url_fuente  = EXCLUDED.url_fuente,
+                        updated_at  = now()
                     RETURNING id
                     """,
-                    (b.comercio, b.descuento, banco_id, categoria_id, tarjeta_id,
-                     b.url_fuente, fp),
+                    (b.comercio, b.descuento, b.condiciones or None, banco_id, categoria_id,
+                     tarjeta_id, b.url_fuente, fp),
                 )
                 row = cur.fetchone()
                 if row is None:

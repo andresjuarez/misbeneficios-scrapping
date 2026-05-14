@@ -9,6 +9,7 @@ class BeneficioRaw(BaseModel):
     categoria_raw: str
     tarjeta_raw: str = ""
     regiones_raw: list[str] = []
+    condiciones: str = ""
     url_fuente: str
     fecha_scraping: datetime = None
 
@@ -25,6 +26,7 @@ class BeneficioNormalizado(BaseModel):
     categoria: str
     tarjeta: str
     regiones: list[str]
+    condiciones: str = ""
     url_fuente: str
     fecha_scraping: datetime
     categoria_pendiente: bool = False

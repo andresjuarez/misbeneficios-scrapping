@@ -251,6 +251,7 @@ class SantanderScraper(BaseScraper):
             regiones_raw = []
 
         url_fuente = item.get("url") or BANCO_URL
+        condiciones = (item.get("conditions") or "").strip()
 
         return BeneficioRaw(
             banco="Santander",
@@ -259,6 +260,7 @@ class SantanderScraper(BaseScraper):
             categoria_raw=categoria_raw,
             tarjeta_raw=tarjeta_raw,
             regiones_raw=regiones_raw,
+            condiciones=condiciones,
             url_fuente=url_fuente,
             fecha_scraping=datetime.now(),
         )
