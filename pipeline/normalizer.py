@@ -92,6 +92,7 @@ REGION_MAP: dict[str, str] = {
     "all":                      "Todas las regiones",
     "todas":                    "Todas las regiones",
     "todo el territorio":       "Todas las regiones",
+    "todas las regiones":       "Todas las regiones",  # ya canonicalizada por scrapers
 
     # RM
     "region metropolitana":     "Región Metropolitana",
