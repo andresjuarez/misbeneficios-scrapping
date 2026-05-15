@@ -6,28 +6,30 @@
 Sitios bancarios
       │
       ▼
-┌─────────────────────────────────────────────┐
-│               SCRAPERS (por banco)           │
-│                                             │
-│  Playwright (SPA)  │  httpx (API interna)   │
-│  BCI, Falabella,   │  Santander, BancoChile │
-│  BancoEstado...    │  (si se descubre API)  │
-└──────────┬──────────────────────────────────┘
+┌──────────────────────────────────────────────────┐
+│               SCRAPERS (por banco)                │
+│                                                  │
+│  Tipo A' — Playwright+intercept  │  Tipo A — httpx│
+│  Santander                       │  Banco de Chile│
+│                                  │                │
+│  Tipo B — Playwright DOM parse                    │
+│  BCI, Falabella, BancoEstado... (pendiente)       │
+└──────────┬───────────────────────────────────────┘
            │  Lista de BeneficioRaw (Pydantic)
            ▼
-┌─────────────────────────────────────────────┐
-│               PIPELINE                      │
-│                                             │
-│  1. Normalizer   → categoría, región,       │
-│                    tipo tarjeta canónicos   │
-│  2. Deduplicator → compara contra BD,       │
-│                    filtra ya existentes     │
-│  3. Uploader     → POST /api/beneficios     │
-│                    (o INSERT directo)       │
-└──────────┬──────────────────────────────────┘
+┌──────────────────────────────────────────────────┐
+│               PIPELINE                            │
+│                                                  │
+│  1. Normalizer   → categoría, región,            │
+│                    tipo tarjeta canónicos        │
+│  2. Deduplicator → compara fingerprints en BD,   │
+│                    filtra ya existentes          │
+│  3. Uploader     → INSERT directo a PostgreSQL   │
+│                    con UPSERT por fingerprint    │
+└──────────┬───────────────────────────────────────┘
            │
            ▼
-    PostgreSQL (misBeneficios BD)
+    PostgreSQL 5433 (misBeneficios BD)
 ```
 
 ---
@@ -60,12 +62,13 @@ Lo que extrae el scraper antes de normalizar:
 
 ```python
 class BeneficioRaw(BaseModel):
-    banco: str              # "Banco de Chile", "BCI", etc. (tal como aparece en el sitio)
+    banco: str              # "Santander", "BancoChile", etc. (nombre canónico del banco)
     comercio: str           # "Starbucks", "LATAM", etc.
-    descuento: str          # Texto completo del beneficio
-    categoria_raw: str      # Categoría tal como la usa el banco ("Food & Drink", "Gastronomía", etc.)
-    tarjeta_raw: str        # "Visa", "Mastercard", "AMEX", etc. (puede ser vacío)
-    regiones_raw: list[str] # Regiones tal como las nombra el banco
+    descuento: str          # Texto del beneficio (corto y limpio)
+    categoria_raw: str      # Categoría tal como la usa el banco o su slug
+    tarjeta_raw: str        # "Visa", "Mastercard", "American Express" (puede ser vacío)
+    regiones_raw: list[str] # Regiones — pueden ser crudas (BancoChile ya las pre-normaliza)
+    condiciones: str = ""   # Texto legal / condiciones de uso
     url_fuente: str         # URL exacta del beneficio
     fecha_scraping: datetime
 ```
@@ -80,25 +83,49 @@ class BeneficioNormalizado(BaseModel):
     categoria: str          # Nombre canónico (debe existir en tabla categorias)
     tarjeta: str            # "Visa" | "Mastercard" | "American Express"
     regiones: list[str]     # Nombres canónicos (deben existir en tabla regiones)
+    condiciones: str = ""   # Texto legal (puede ser vacío)
+    url_fuente: str
+    fecha_scraping: datetime
+    categoria_pendiente: bool = False  # True si no se encontró mapeo canónico
 ```
 
 ---
 
 ## Estrategias de extracción
 
-### Tipo A — API interna (preferida)
+### Tipo A — API pública REST (preferida)
 
-Algunos bancos cargan los beneficios desde un endpoint REST interno que su frontend SPA consume. Si se puede identificar esta API (usando DevTools → Network → XHR/Fetch), el scraping se reduce a:
+Algunos bancos exponen sus beneficios vía una API REST que no requiere autenticación. Se llama directamente con httpx:
 
 ```python
 async def scrape() -> list[BeneficioRaw]:
     async with httpx.AsyncClient() as client:
-        resp = await client.get("https://api.banco.cl/beneficios", headers={...})
+        resp = await client.get("https://api.banco.cl/beneficios?page=1&per_page=100")
         data = resp.json()
-        return [parse_item(item) for item in data["beneficios"]]
+        return [parse_item(item) for item in data["entries"]]
 ```
 
 Ventajas: rápido, estable, no depende del HTML, menos probable de romperse.
+
+**Ejemplo implementado:** Banco de Chile (`scrapers/bancochile.py`)
+
+### Tipo A' — Playwright + intercepción de API (semi-headless)
+
+La API existe pero el servidor bloquea llamadas directas (verifica Referer, cookies de sesión, headers de navegador). Playwright lanza un browser real en modo stealth y en lugar de parsear el DOM, intercepta la respuesta de red de la API:
+
+```python
+async with page.expect_response(
+    lambda r: r.url.startswith(API_URL_BASE) and r.status == 200,
+    timeout=45_000,
+) as response_info:
+    await page.goto(BANCO_URL, wait_until="domcontentloaded")
+
+data = await (await response_info.value).json()
+```
+
+Más lento que Tipo A (~10-15s extra por el browser), pero más estable que parsear DOM.
+
+**Ejemplo implementado:** Santander (`scrapers/santander.py`)
 
 ### Tipo B — SPA con Playwright
 
@@ -155,36 +182,32 @@ async def scrape() -> list[BeneficioRaw]:
 
 ## Integración con misBeneficios backend
 
-**Opción A — Via API REST (recomendada para empezar)**
+**Implementado: Insert directo en PostgreSQL (Opción B)**
 
-El uploader hace POST a los endpoints existentes del backend. No requiere acceso directo a la BD.
-
-```python
-async def upload(beneficio: BeneficioNormalizado):
-    async with httpx.AsyncClient() as client:
-        await client.post(
-            "http://localhost:3001/api/beneficios",
-            json=beneficio.model_dump(),
-            headers={"Authorization": f"Bearer {API_KEY}"}
-        )
-```
-
-Requiere agregar un endpoint de escritura al backend (actualmente solo hay GET).
-
-**Opción B — Insert directo en PostgreSQL**
-
-Más simple para comenzar, sin modificar el backend. Usa las mismas credenciales de BD.
+Se usa psycopg2 con un patrón UPSERT por `fingerprint`. Si el beneficio ya existe, actualiza `descuento`, `condiciones` y `url_fuente`; si es nuevo, inserta.
 
 ```python
-import psycopg2
-
-def upload(beneficios: list[BeneficioNormalizado]):
-    with psycopg2.connect(DATABASE_URL) as conn:
-        with conn.cursor() as cur:
-            cur.execute("SELECT id, nombre FROM bancos")
-            bancos_map = {row[1]: row[0] for row in cur.fetchall()}
-            # ... INSERT INTO beneficios ...
+cur.execute("""
+    INSERT INTO beneficios
+        (comercio, descuento, condiciones, banco_id, categoria_id,
+         tipo_tarjeta_id, url_fuente, activo, fingerprint)
+    VALUES (%s, %s, %s, %s, %s, %s, %s, true, %s)
+    ON CONFLICT (fingerprint) DO UPDATE SET
+        descuento   = EXCLUDED.descuento,
+        condiciones = EXCLUDED.condiciones,
+        url_fuente  = EXCLUDED.url_fuente,
+        updated_at  = now()
+    RETURNING id
+""", (...))
 ```
+
+El uploader también inserta en `beneficio_regiones` (tabla de unión N:M) con `ON CONFLICT DO NOTHING`.
+
+**Nota de infraestructura:** el PostgreSQL de Docker corre en puerto 5433 (no 5432) para evitar conflicto con el PostgreSQL local de macOS. La variable `DATABASE_URL` en `.env` debe especificar el puerto: `postgresql://user:pass@localhost:5433/misbeneficios`.
+
+**Opción A — Via API REST (no implementada)**
+
+Requeriría agregar endpoints de escritura al backend NestJS. Queda pendiente si se necesita desacoplar el scraper de acceso directo a BD.
 
 ---
 

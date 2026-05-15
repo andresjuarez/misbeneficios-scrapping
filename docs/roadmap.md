@@ -1,6 +1,6 @@
 # Roadmap de implementación
 
-## Fase 0 — Setup del proyecto (1-2 días)
+## Fase 0 — Setup del proyecto ✅ Completa
 
 **Objetivo:** Estructura base lista para implementar scrapers.
 
@@ -8,60 +8,75 @@
 - [x] Documentar arquitectura técnica
 - [x] Analizar bancos y definir estrategias
 - [x] Definir tablas de normalización
-- [ ] Crear `requirements.txt` con dependencias
-- [ ] Crear `config.py` con variables de entorno
-- [ ] Crear modelos Pydantic (`models/beneficio.py`)
-- [ ] Crear clase base abstracta (`scrapers/base.py`)
-- [ ] Crear pipeline base (`pipeline/normalizer.py`, `pipeline/deduplicator.py`, `pipeline/uploader.py`)
-- [ ] Crear orquestador principal (`main.py`)
-- [ ] Crear `.env.example`
+- [x] Crear `requirements.txt` con dependencias
+- [x] Crear `config.py` con variables de entorno
+- [x] Crear modelos Pydantic (`models/beneficio.py`)
+- [x] Crear clase base abstracta (`scrapers/base.py`)
+- [x] Crear pipeline base (`pipeline/normalizer.py`, `pipeline/deduplicator.py`, `pipeline/uploader.py`)
+- [x] Crear orquestador principal (`main.py`)
+- [x] Crear `.env.example`
+
+**Notas de implementación:**
+- Python 3.13 requirió versiones sin pin (`psycopg2-binary>=2.9.10`, `pydantic>=2.9.0`, `greenlet>=3.0.0`)
+- Docker PostgreSQL movido a puerto 5433 para evitar conflicto con PostgreSQL local en 5432
+- Uploader usa INSERT directo con psycopg2 (no via API REST) + patrón UPSERT por fingerprint
 
 **Criterio de éxito:** `python main.py --dry-run` corre sin errores con lista vacía.
 
 ---
 
-## Fase 1 — Primer scraper (3-5 días)
+## Fase 1 — Primer scraper ✅ Completa
 
 **Objetivo:** Datos reales de un banco en BD.
 
-### Banco objetivo: Santander (Tipo A — API interna)
-
-Santander fue elegido como primer banco porque:
-- Probablemente tiene API interna (más simple de implementar)
-- Alta prioridad (banco grande)
-- El patrón API sirve de template para otros bancos similares
+### Banco objetivo: Santander
 
 ### Tareas
-- [ ] Investigar API interna de Santander con DevTools
-- [ ] Implementar `scrapers/santander.py`
-- [ ] Probar extracción en modo dry-run
-- [ ] Correr pipeline completo (normalizar → deduplicar → insertar)
-- [ ] Verificar datos en BD de misBeneficios
+- [x] Investigar API interna de Santander con DevTools
+- [x] Implementar `scrapers/santander.py`
+- [x] Probar extracción en modo dry-run
+- [x] Correr pipeline completo (normalizar → deduplicar → insertar)
+- [x] Verificar datos en BD de misBeneficios
 
-**Criterio de éxito:** Al menos 20 beneficios de Santander en BD, categorías y regiones normalizadas correctamente.
+**Notas de implementación:**
+- La API devuelve 403 a llamadas directas de httpx → se usa Playwright en modo stealth para interceptar la respuesta (`page.expect_response()`)
+- URL con hash dinámico por sesión → se intercepta por prefijo `promociones.json`, no por URL exacta
+- ~275 beneficios insertados en BD; `cat-otros` marcados como `categoria_pendiente=True`
+- Se agregó campo `condiciones` al modelo, migración de BD y frontend (drawer lateral)
+
+**Criterio de éxito:** ✅ 275 beneficios de Santander en BD, categorías y regiones normalizadas.
 
 ---
 
-## Fase 2 — Scrapers prioritarios (2-3 semanas)
+## Fase 2 — Scrapers prioritarios (en curso)
 
 **Objetivo:** Cubrir los 5 bancos de mayor volumen.
 
 ### Orden de implementación
 
-| # | Banco | Tipo | Complejidad | Estado |
-|---|-------|------|-------------|--------|
-| 1 | Santander | A — API | Baja | Fase 1 |
-| 2 | Banco de Chile | A o B | Baja-Media | Pendiente |
-| 3 | BCI | B — SPA | Media | Pendiente |
-| 4 | Falabella | B — SPA | Media | Pendiente |
-| 5 | BancoEstado | B o C | Media | Pendiente |
+| # | Banco | Tipo | Estado |
+|---|-------|------|--------|
+| 1 | Santander | A' — Playwright + intercepción API | ✅ Completo |
+| 2 | Banco de Chile | A — API pública REST | ✅ Completo |
+| 3 | BCI | B — SPA | Pendiente |
+| 4 | Falabella | B — SPA | Pendiente |
+| 5 | BancoEstado | B o C | Pendiente |
 
-### Tareas por banco
+### Banco de Chile — notas de implementación
+- [x] API pública descubierta en subdominio `sitiospublicos.bancochile.cl`
+- [x] Implementar `scrapers/bancochile.py` (httpx, sin Playwright)
+- [x] Paginación por query param `&page={n}`, `meta.total_pages=8`, `per_page=100`
+- [x] Un BeneficioRaw por red de tarjeta (Visa / Mastercard) — beneficios con ambas redes generan 2 registros
+- [x] Categorías desde `meta.category_slug`, incluyendo slugs de campaña mapeados a canónicas
+- [x] Regiones desde `meta.tags` — mix de slugs de región y ciudad
+- [x] Test en dry-run: 1446 raw, 1446 normalizados, 746 nuevos a insertar
+
+### Tareas pendientes (BCI, Falabella, BancoEstado)
 - [ ] Investigar sitio (Network tab, robots.txt)
 - [ ] Implementar scraper
 - [ ] Adaptar tabla de normalización si aparecen categorías nuevas
 - [ ] Test en dry-run
-- [ ] Inserción en BD de staging
+- [ ] Inserción en BD
 
 **Criterio de éxito:** +100 beneficios de 5 bancos diferentes en BD, sin duplicados, con categorías y regiones válidas.
 

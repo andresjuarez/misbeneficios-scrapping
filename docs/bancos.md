@@ -35,26 +35,99 @@ Para cada banco se documenta: URL de beneficios, tipo de sitio detectado, estrat
 
 ---
 
-## Santander
+## Santander ✅ Implementado
 
 | Campo | Valor |
 |-------|-------|
 | URL beneficios | `https://banco.santander.cl/beneficios/` |
 | URL detalle | `https://banco.santander.cl/beneficios/?slug={slug}` |
-| Tipo probable | **A — API interna** (el slug en query param es indicio) |
-| Prioridad | Alta |
+| Tipo confirmado | **A' — Playwright + intercepción de API** |
+| Estado | Scraper en producción |
+| Resultados | ~275 beneficios extraídos |
 
-**Lo que hay que investigar:**
-- El parámetro `?slug=` sugiere que hay una API que devuelve el beneficio por slug
-- Buscar en Network tab llamadas a `api.santander.cl` o similar
-- Endpoint de listado: buscar request al cargar `/beneficios/` sin slug
-- Headers de autenticación requeridos (si los hay)
+### Por qué no es Tipo A puro
 
-**Estrategia probable:**
+La API existe (`promociones.json`) pero devuelve 403 si se llama directo con httpx. El servidor verifica que el request venga de un navegador real (Referer, cookies de sesión, headers). Solución: Playwright en modo stealth lanza el navegador real, y en lugar de parsear el DOM, interceptamos la respuesta de red de la API.
+
+Adicionalmente, la URL tiene un hash dinámico que cambia en cada sesión:
 ```
-GET https://[api-interna].santander.cl/beneficios?page=1&size=50
-→ JSON con lista de beneficios
+https://banco.santander.cl/beneficios/promociones.json?_=a3f9c2...
 ```
+
+Por eso se intercepta por prefijo de URL, no por URL exacta.
+
+### Estrategia implementada
+
+```python
+# Playwright stealth → esperar respuesta de API
+async with page.expect_response(
+    lambda r: r.url.startswith("https://banco.santander.cl/beneficios/promociones.json")
+              and r.status == 200,
+    timeout=45_000,
+) as response_info:
+    await page.goto(BANCO_URL, wait_until="domcontentloaded")
+
+data = await (await response_info.value).json()
+```
+
+Flags anti-detección:
+```python
+args=["--disable-blink-features=AutomationControlled", ...]
+await context.add_init_script(
+    "Object.defineProperty(navigator, 'webdriver', {get: () => undefined})"
+)
+```
+
+### Estructura del JSON
+
+```json
+{
+  "promociones": [
+    {
+      "title": "Starbucks",
+      "tags": ["cat-sabores", "wm-limited"],
+      "custom_fields": {
+        "Bajada externa":      { "value": "20% de descuento" },
+        "Región cobertura":    { "value": "Metropolitana, Valparaíso" }
+      },
+      "conditions": "Válido lunes y martes. Tope $5.000 por transacción.",
+      "url": "https://banco.santander.cl/beneficios/?slug=starbucks"
+    }
+  ]
+}
+```
+
+### Mapeo de categorías (tags `cat-*`)
+
+| Tag Santander | Categoría canónica |
+|---------------|-------------------|
+| `cat-sabores` | Gastronomía |
+| `cat-viajes` | Viajes |
+| `cat-compras` | Compras |
+| `cat-bencina` | Bencina |
+| `cat-salud` | Salud |
+| `cat-entretenimiento` | Entretenimiento |
+| `cat-supermercados` | Supermercados |
+| `cat-tecnologia` / `cat-tecnología` | Tecnología |
+| `cat-descuentos` | Compras |
+| `cat-cuotas-sin-interes` | Compras |
+| `cat-multiplica-millas` | Viajes |
+| `cat-verdes` | Compras |
+| `cat-otros` | *(pendiente — `categoria_pendiente=True`)* |
+
+### Mapeo de tarjetas (tags)
+
+| Tag Santander | Tarjeta canónica |
+|---------------|-----------------|
+| `wm-limited` | Mastercard |
+| `exclusivo-limited` | Mastercard |
+| *(cualquier otro o ninguno)* | Visa |
+
+### Mapeo de regiones
+
+El campo `custom_fields["Región cobertura"]["value"]` es una cadena separada por comas:
+- `"Metropolitana, Valparaíso"` → split → normalizar cada una
+- Vacío → `["Todas las regiones"]`
 
 ---
 
@@ -89,19 +162,123 @@ GET https://[api-interna].santander.cl/beneficios?page=1&size=50
 
 ---
 
-## Banco de Chile
+## Banco de Chile ✅ Implementado
 
 | Campo | Valor |
 |-------|-------|
 | URL beneficios | `https://sitiospublicos.bancochile.cl/personas/beneficios` |
 | URL detalle | `https://sitiospublicos.bancochile.cl/personas/beneficios/detalle/{slug}` |
-| Tipo probable | **A o B** |
-| Prioridad | Alta |
+| Tipo confirmado | **A — API pública REST (httpx directo)** |
+| Estado | Scraper en producción |
+| Resultados | ~1446 registros raw (un registro por red de tarjeta por beneficio) |
 
-**Lo que hay que investigar:**
-- El subdominio `sitiospublicos` sugiere que hay una API detrás
-- Buscar calls a `api.bancochile.cl` o similar en Network tab
-- Banco de Chile tiene tarjetas Visa y Mastercard — verificar distinción en los beneficios
+### Endpoint
+
+```
+GET https://sitiospublicos.bancochile.cl/api/content/spaces/personas/types/beneficios/entries
+    ?meta.category[in][]=beneficios
+    &sort_by=meta.updated_at
+    &order=desc
+    &per_page=100
+    &page={n}
+```
+
+No requiere autenticación. Responde en JSON sin restricciones de Referer/cookies.
+
+### Paginación
+
+```json
+{
+  "meta": {
+    "total_pages": 8,
+    "current_page": 1,
+    "total_count": 756
+  },
+  "entries": [ ... ]
+}
+```
+
+Se itera `page` de 1 a `meta.total_pages`. Con `per_page=100` son 8 páginas (~756 beneficios base; el total de registros raw es mayor porque se genera uno por red de tarjeta).
+
+### Estructura de un entry
+
+```json
+{
+  "meta": {
+    "slug": "descuento-starbucks-visa",
+    "category_slug": "restaurantes-y-bares",
+    "tags": ["todo-chile", "restaurantes-y-bares"]
+  },
+  "fields": {
+    "Titulo": "Starbucks",
+    "Tipo Beneficio": "20% dto.",
+    "Descripcion": "<p>Disfruta 20% de descuento...</p>",
+    "Condiciones Comerciales": "<p>Tope $3.000. Lunes a viernes.</p>",
+    "Tarjetas Permitidas": ["visa-credito", "visa-debito"]
+  }
+}
+```
+
+### Campos utilizados
+
+| Campo fuente | Campo destino | Notas |
+|-------------|---------------|-------|
+| `fields.Titulo` | `comercio` | Texto limpio |
+| `fields["Tipo Beneficio"]` | `descuento` | Texto corto ya limpio |
+| `fields.Descripcion` | `descuento` (fallback) | HTML → BeautifulSoup para limpiar |
+| `fields["Condiciones Comerciales"]` | `condiciones` | HTML → BeautifulSoup |
+| `meta.category_slug` | `categoria_raw` | Ver mapeo abajo |
+| `fields["Tarjetas Permitidas"]` | `tarjeta_raw` | Un BeneficioRaw por red presente |
+| `meta.tags` | `regiones_raw` | Slugs → región canónica |
+| `meta.slug` | `url_fuente` | Construida como `/personas/beneficios/detalle/{slug}` |
+
+### Mapeo de categorías (`meta.category_slug`)
+
+| Slug BancoChile | Categoría canónica |
+|-----------------|-------------------|
+| `restaurantes-y-bares` | Gastronomía |
+| `sabores-gourmet` | Gastronomía |
+| `comida-rapida` | Gastronomía |
+| `supermercados` | Supermercados |
+| `viajes` / `turismo` | Viajes |
+| `entretenimiento` / `entretencion` | Entretenimiento |
+| `cine-y-teatro` / `deportes` | Entretenimiento |
+| `compras` / `retail` / `moda` / `hogar` | Compras |
+| `beneficios-y-descuentos` | Compras |
+| `catalogo-productos` / `dolares-premio` | Compras |
+| `mascotas` / `sustentable` | Compras |
+| `40-de-descuento-visa` / `50-de-descuento-visa-infinite` | Compras *(slugs de campaña)* |
+| `tecnologia` / `tech` | Tecnología |
+| `bencina` / `combustible` | Bencina |
+| `salud` / `farmacias` / `salud-y-bienestar` / `belleza` | Salud |
+
+### Mapeo de tarjetas (`fields["Tarjetas Permitidas"]`)
+
+El campo es un array de slugs con prefijo de red:
+- `visa-credito`, `visa-debito`, `visa-infinite` → **Visa**
+- `mastercard-*`, `mastercard-black` → **Mastercard**
+- `amex-*` → **American Express**
+
+Si un entry tiene ambas redes, se generan **dos `BeneficioRaw`** (uno por red), resultando en dos registros independientes en BD.
+
+### Mapeo de regiones (`meta.tags`)
+
+Los tags mezclan regiones y ciudades. El scraper resuelve slugs directamente a nombre canónico antes de pasar al normalizer:
+
+| Tag slug | Región canónica |
+|----------|----------------|
+| `todo-chile` / `nacional` | Todas las regiones |
+| `metropolitana-de-santiago` | Región Metropolitana |
+| `las-condes` / `providencia` / `vitacura` / `santiago` | Región Metropolitana |
+| `valparaíso` / `viña-del-mar` | Valparaíso |
+| `biobío` / `concepción` | Biobío |
+| `la-araucanía` / `temuco` | La Araucanía |
+| `maule` / `talca` | Maule |
+| `o-higgins` / `rancagua` | O'Higgins |
+| `los-lagos` / `puerto-montt` | Los Lagos |
+| *(y resto de regiones)* | Mapeado en `_SLUG_REGION_MAP` |
+
+Si no se detecta ninguna región en los tags, el normalizer asigna `["Todas las regiones"]`.
 
 ---
 
@@ -177,18 +354,18 @@ GET https://[api-interna].santander.cl/beneficios?page=1&size=50
 
 ## Resumen de prioridades
 
-| Banco | Tipo estimado | Prioridad | Complejidad |
-|-------|--------------|-----------|-------------|
-| BCI | B — SPA | Alta | Media |
-| Santander | A — API | Alta | Baja |
-| Banco de Chile | A o B | Alta | Baja-Media |
-| Falabella | B — SPA | Alta | Media |
-| BancoEstado | B o C | Alta | Media |
-| Scotiabank | B — SPA | Media | Media |
-| Itaú | B — SPA | Media | Media |
-| Ripley | B — SPA | Media | Media |
-| BICE | B o C | Baja | Alta |
-| Security | B — SPA | Baja | Media |
+| Banco | Tipo confirmado | Prioridad | Estado |
+|-------|----------------|-----------|--------|
+| Santander | A' — Playwright + intercepción API | Alta | ✅ En producción |
+| Banco de Chile | A — API pública REST | Alta | ✅ En producción |
+| BCI | B — SPA | Alta | Pendiente |
+| Falabella | B — SPA | Alta | Pendiente |
+| BancoEstado | B o C | Alta | Pendiente |
+| Scotiabank | B — SPA | Media | Pendiente |
+| Itaú | B — SPA | Media | Pendiente |
+| Ripley | B — SPA | Media | Pendiente |
+| BICE | B o C | Baja | Pendiente |
+| Security | B — SPA | Baja | Pendiente |
 
 ---
 
